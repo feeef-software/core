@@ -21,7 +21,22 @@ export type {
 } from '@openrouter/sdk/models'
 
 /** Feeef routing — not part of OpenRouter's schema. */
-export type AiProviderKind = 'google' | 'openai' | 'azure' | 'openrouter'
+export type AiProviderKind = 'google' | 'openai' | 'azure' | 'openrouter' | 'coconutstudio'
+
+/** Same keys as catalog row `pricing` for per-image USD. */
+export type CatalogImagePricing = {
+  image_output?: string | number
+  imageOutput?: string | number
+  image_output_per_size_usd?: Partial<Record<'1K' | '2K' | '4K', number>>
+  imageOutputPerSizeUsd?: Partial<Record<'1K' | '2K' | '4K', number>>
+}
+
+/** What Coconutstudio charges Feeef per generated image (any size). */
+export const COCONUTSTUDIO_FLAT_IMAGE_USD = 0.04
+
+export const FALLBACK_DEFAULT_TEXT_MODEL = 'gemini-flash-lite-latest'
+export const FALLBACK_DEFAULT_IMAGE_MODEL = 'gpt-image-2'
+export const FALLBACK_DEFAULT_CODING_MODEL = 'gemini-flash-lite-latest'
 
 export interface ProviderRegistryRow {
   slug: string
@@ -29,6 +44,7 @@ export interface ProviderRegistryRow {
   baseUrl: string
   displayName?: string
   name?: string
+  pricing?: CatalogImagePricing
 }
 
 /**
@@ -68,4 +84,7 @@ export type ModelCatalogRow = import('@openrouter/sdk/models').Model & {
 export interface ModelsCatalogConfig {
   providers: ProviderRegistryRow[]
   data: ModelCatalogRow[]
+  defaultTextModel?: string
+  defaultImageModel?: string
+  defaultCodingModel?: string
 }

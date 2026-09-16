@@ -41,7 +41,12 @@
  * `useOptions.ts`.
  */
 
-import { ModelsCatalogConfig, ModelCatalogRow } from '../core/models_catalog.js'
+import {
+  ModelsCatalogConfig,
+  ModelCatalogRow,
+  COCONUTSTUDIO_FLAT_IMAGE_USD,
+  FALLBACK_DEFAULT_IMAGE_MODEL,
+} from '../core/models_catalog.js'
 
 /** Fallback DZD per USD when `aiModels.exchangeRate` is missing (mirror backend). */
 export const FALLBACK_AI_EXCHANGE_RATE = 260
@@ -368,7 +373,7 @@ export interface AiCostEstimate {
 
 /** Named platform default for unknown text models — never `models[0]`. */
 const DEFAULT_TEXT_PRICING_MODEL_ID = 'gemini-flash-lite-latest'
-const DEFAULT_IMAGE_MODEL_ID = 'gemini-3.1-flash-image-preview'
+const DEFAULT_IMAGE_MODEL_ID = FALLBACK_DEFAULT_IMAGE_MODEL
 const DEFAULT_TTS_MODEL_ID = 'gemini-2.5-pro-preview-tts'
 
 /** Canonical id: trim, lowercase, strip the Gemini `models/` namespace. */
@@ -513,23 +518,21 @@ export class AiCalculator {
   // -- image pricing ----------------------------------------------------------
 
   /**
-   * Catalog per-image USD, preferring the per-tier map
-   * (`image_output_per_size_usd`: requested tier → 1K → 2K → 4K → first
-   * positive), then flat `image_output`.
+   * USD per image from a pricing blob (provider or row). Per-tier map first,
+   * then flat `image_output`.
    */
-  private pickCatalogImageUsd(modelId: string, imageSize?: string): number | null {
-    const row = this.findCatalogRow(modelId)
-    const pricing = row?.pricing as
-      | {
-          image_output?: unknown
-          imageOutput?: unknown
-          image_output_per_size_usd?: unknown
-          imageOutputPerSizeUsd?: unknown
-        }
-      | undefined
+  private pickUsdFromImagePricing(
+    pricing: unknown,
+    imageSize?: string
+  ): number | null {
     if (!pricing || typeof pricing !== 'object') return null
-
-    const perTier = (pricing.image_output_per_size_usd ?? pricing.imageOutputPerSizeUsd) as
+    const p = pricing as {
+      image_output?: unknown
+      imageOutput?: unknown
+      image_output_per_size_usd?: unknown
+      imageOutputPerSizeUsd?: unknown
+    }
+    const perTier = (p.image_output_per_size_usd ?? p.imageOutputPerSizeUsd) as
       | Record<string, unknown>
       | undefined
     if (perTier && typeof perTier === 'object') {
@@ -543,9 +546,37 @@ export class AiCalculator {
         if (n > 0) return n
       }
     }
-
-    const flat = safeNumber(pricing.image_output ?? pricing.imageOutput)
+    const flat = safeNumber(p.image_output ?? p.imageOutput)
     return flat > 0 ? flat : null
+  }
+
+  /** Catalog-row per-image USD (no provider rate card). */
+  private pickCatalogImageUsd(modelId: string, imageSize?: string): number | null {
+    const row = this.findCatalogRow(modelId)
+    return this.pickUsdFromImagePricing(row?.pricing, imageSize)
+  }
+
+  private findProviderForModel(modelId: string) {
+    const row = this.findCatalogRow(modelId)
+    const slug = (row as { provider_slug?: string } | undefined)?.provider_slug
+    if (!slug) return undefined
+    return this.config.modelsCatalog?.providers?.find((p) => p.slug === slug)
+  }
+
+  /**
+   * Provider USD per image. Precedence: provider card → Coconutstudio kind
+   * flat $0.04 → catalog row → legacy `unit:'image'` → defaultImageCost floor.
+   */
+  private resolveImageProviderUsd(modelId: string, imageSize?: string): number {
+    const provider = this.findProviderForModel(modelId)
+    const card = this.pickUsdFromImagePricing(provider?.pricing, imageSize)
+    if (card !== null) return card
+    if (provider?.kind === 'coconutstudio') return COCONUTSTUDIO_FLAT_IMAGE_USD
+    const catalogUsd = this.pickCatalogImageUsd(modelId, imageSize)
+    if (catalogUsd !== null) return catalogUsd
+    const legacyUsd = this.pickLegacyImageUsd(modelId)
+    if (legacyUsd !== null) return legacyUsd
+    return this.config.defaultImageCost / this.config.exchangeRate
   }
 
   /** Legacy exact-id `unit:'image'` row output (USD per image). */
@@ -742,7 +773,7 @@ export class AiCalculator {
     } = {}
   ): AiCostEstimate {
     const {
-      modelId = DEFAULT_IMAGE_MODEL_ID,
+      modelId = this.config.modelsCatalog?.defaultImageModel?.trim() || DEFAULT_IMAGE_MODEL_ID,
       attachmentCount = 0,
       attachmentResolution = 'medium',
       resolution,
@@ -755,11 +786,8 @@ export class AiCalculator {
     const { exchangeRate, billing } = this.config
     const mult = billing.retailMarkup.multiplier
 
-    // Provider USD per image: catalog → legacy row → defaultImageCost floor.
-    const catalogUsd = this.pickCatalogImageUsd(modelId, imageSize)
-    const legacyUsd = catalogUsd === null ? this.pickLegacyImageUsd(modelId) : null
-    const providerCostUsdPerImage =
-      catalogUsd ?? legacyUsd ?? this.config.defaultImageCost / exchangeRate
+    // Provider USD per image: provider card → Coconutstudio $0.04 → row → legacy → floor.
+    const providerCostUsdPerImage = this.resolveImageProviderUsd(modelId, imageSize)
     const providerCostDzdPerImage = providerCostUsdPerImage * exchangeRate
 
     const localCost = this.findLegacyModel(modelId)?.localCost
